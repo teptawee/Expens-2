@@ -900,3 +900,22 @@ input:focus,select:focus,textarea:focus{
   .bm-input-group{justify-content:flex-end}
   .orb{filter:blur(40px)}
 }
+
+/* ============ SKELETON LOADING ============ */
+.skeleton{
+  background:linear-gradient(90deg, #F0E6F5 25%, #F8F3FF 50%, #F0E6F5 75%);
+  background-size:200% 100%;
+  animation:skeletonShimmer 1.5s infinite;
+  border-radius:12px;
+  height:14px;
+}
+body.dark .skeleton{
+  background:linear-gradient(90deg, #3A2F4A 25%, #4A3F5A 50%, #3A2F4A 75%);
+  background-size:200% 100%;
+}
+@keyframes skeletonShimmer{
+  0%{background-position:200% 0}
+  100%{background-position:-200% 0}
+}
+.skeleton-line{margin-bottom:10px;height:16px}
+.skeleton-line.short{width:60%}
