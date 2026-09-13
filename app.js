@@ -63,6 +63,45 @@ function closeModal(id){
   document.getElementById(id).style.display = 'none';
 }
 
+/* ============ LOCALSTORAGE CACHE ============ */
+function saveCache(key, data, ttl){
+  try{
+    localStorage.setItem('exp_' + key, JSON.stringify({
+      data: data,
+      exp: Date.now() + (ttl || 5*60*1000)
+    }));
+  }catch(e){}
+}
+
+function loadCache(key){
+  try{
+    var raw = localStorage.getItem('exp_' + key);
+    if(!raw) return null;
+    var obj = JSON.parse(raw);
+    if(Date.now() > obj.exp){
+      localStorage.removeItem('exp_' + key);
+      return null;
+    }
+    return obj.data;
+  }catch(e){ return null; }
+}
+
+function clearCache(key){
+  try{
+    if(key) localStorage.removeItem('exp_' + key);
+    else {
+      Object.keys(localStorage)
+        .filter(function(k){ return k.indexOf('exp_') === 0; })
+        .forEach(function(k){ localStorage.removeItem(k); });
+    }
+  }catch(e){}
+}
+
+function invalidateCache(){
+  clearCache('initData');
+  clearCache('dashboard_' + dashMonth);
+}
+
 /* ============ API CALL ============ */
 function gs(fn){
   var args = Array.prototype.slice.call(arguments, 1);
@@ -79,10 +118,7 @@ function gs(fn){
     })
   })
   .then(function(r){
-    if(!r.ok){
-      console.error('❌ HTTP', r.status, 'at', url);
-      throw new Error('HTTP ' + r.status);
-    }
+    if(!r.ok) throw new Error('HTTP ' + r.status);
     return r.text();
   })
   .then(function(txt){
@@ -93,7 +129,7 @@ function gs(fn){
     } catch(parseErr){
       if(parseErr.message && parseErr.message.indexOf('API Error') === 0) throw parseErr;
       if(parseErr.message === 'Unauthorized') throw parseErr;
-      console.error('❌ Response ไม่ใช่ JSON:', txt.substring(0, 500));
+      console.error('Response:', txt.substring(0, 500));
       throw new Error('Response ไม่ใช่ JSON');
     }
   });
@@ -210,7 +246,7 @@ function fireConfetti(){
   }
 }
 
-/* ============ INIT ============ */
+/* ============ INIT (OPTIMIZED) ============ */
 window.addEventListener('load', function(){
   loadTheme();
   var today = new Date();
@@ -224,23 +260,59 @@ window.addEventListener('load', function(){
   document.getElementById('dashMonthInfo').style.color = '#27AE60';
 
   console.log('🔧 API_URL =', API_URL);
-  console.log('🔧 URL length =', API_URL.length);
 
-  loading(true);
-  gs('getCategories')
-    .then(function(cats){ CATS = cats; return gs('getPayments'); })
-    .then(function(pays){
-      PAYS = pays;
-      fillSelects();
-      return loadDashboard();
+  // ⚡ ลองโหลดจาก cache ก่อน (แสดงทันที)
+  var cached = loadCache('initData');
+  if(cached){
+    applyInitData(cached, true);
+  } else {
+    showSkeletonDashboard();
+    loading(true);
+  }
+
+  // ⚡ เรียก API รอบเดียว
+  var t0 = performance.now();
+  gs('getInitData', currentExpenseLimit, dashMonth)
+    .then(function(data){
+      var t1 = performance.now();
+      console.log('⚡ API took:', Math.round(t1 - t0), 'ms');
+      saveCache('initData', data, 5 * 60 * 1000);
+      applyInitData(data, false);
+      loading(false);
     })
-    .then(function(){ loading(false); })
     .catch(function(e){
       loading(false);
-      toast('❌ โหลดไม่สำเร็จ: ' + e.message);
-      console.error('Init error:', e);
+      if(!cached){
+        toast('❌ โหลดไม่สำเร็จ: ' + e.message);
+        console.error('Init error:', e);
+      }
     });
 });
+
+function applyInitData(data, fromCache){
+  CATS = data.categories || [];
+  PAYS = data.payments || [];
+  DASH = data.dashboard;
+
+  fillSelects();
+  renderSummary();
+  renderCatChart();
+  renderTimeChart();
+  renderPayChart();
+  renderCatLimits();
+
+  if(fromCache){
+    console.log('⚡ ใช้ข้อมูลจาก cache');
+  }
+}
+
+function showSkeletonDashboard(){
+  var grid = document.getElementById('summaryGrid');
+  if(grid){
+    var sk = '<div class="insight-card"><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line short"></div></div>';
+    grid.innerHTML = sk + sk + sk + sk;
+  }
+}
 
 function fillSelects(){
   document.getElementById('f-cat').innerHTML = CATS
@@ -284,6 +356,7 @@ function saveExpense(){
     .then(function(){
       toast('🎉 บันทึกสำเร็จ! เยี่ยมมาก');
       fireConfetti();
+      invalidateCache();
       document.getElementById('f-amount').value = '';
       document.getElementById('f-note').value = '';
       return loadDashboard();
@@ -292,25 +365,43 @@ function saveExpense(){
     .catch(function(e){ loading(false); toast('❌ ' + e.message); });
 }
 
-/* ============ DASHBOARD ============ */
+/* ============ DASHBOARD (OPTIMIZED) ============ */
 function loadDashboard(){
-  loading(true);
+  // ⚡ แสดง cache ก่อน (ถ้ามี)
+  var cached = loadCache('dashboard_' + dashMonth);
+  if(cached){
+    DASH = cached;
+    renderSummary();
+    renderCatChart();
+    renderTimeChart();
+    renderPayChart();
+    renderCatLimits();
+  } else {
+    loading(true);
+  }
+
   return gs('getDashboard', currentExpenseLimit, dashMonth)
     .then(function(d){
-      if(!d || !d.summary){
-        throw new Error('ข้อมูลจากเซิร์ฟเวอร์ว่างเปล่า');
-      }
+      if(!d || !d.summary) throw new Error('ข้อมูลว่างเปล่า');
+
       DASH = d;
-      renderSummary();
-      renderCatChart();
-      renderTimeChart();
-      renderPayChart();
-      renderCatLimits();
+      saveCache('dashboard_' + dashMonth, d, 3 * 60 * 1000);
+
+      // ⚡ re-render เฉพาะเมื่อข้อมูลต่าง
+      if(!cached || JSON.stringify(cached.summary) !== JSON.stringify(d.summary)){
+        renderSummary();
+        renderCatChart();
+        renderTimeChart();
+        renderPayChart();
+        renderCatLimits();
+      }
       loading(false);
     })
     .catch(function(e){
       loading(false);
-      toast('โหลด dashboard ไม่สำเร็จ: ' + e.message);
+      if(!cached){
+        toast('โหลด dashboard ไม่สำเร็จ: ' + e.message);
+      }
       console.error('Dashboard error:', e);
     });
 }
@@ -337,11 +428,8 @@ function renderSummary(){
     }
   }
 
-  var dayBadge = '';
-  if(ins.day){ dayBadge = fmtDiff(ins.day.diff, ins.day.hasHistory, ins.day.isNew); }
-
-  var weekBadge = '';
-  if(ins.week){ weekBadge = fmtDiff(ins.week.diff, ins.week.hasHistory, ins.week.isNew); }
+  var dayBadge = ins.day ? fmtDiff(ins.day.diff, ins.day.hasHistory, ins.day.isNew) : '';
+  var weekBadge = ins.week ? fmtDiff(ins.week.diff, ins.week.hasHistory, ins.week.isNew) : '';
 
   var monthBadge = '';
   var monthSub = '';
@@ -416,8 +504,7 @@ function renderCatChart(){
 
   var iconMap = DASH.catIconMap || {};
   var labelsWithIcon = keys.map(function(k){
-    var ic = iconMap[k] || '📌';
-    return ic + ' ' + k;
+    return (iconMap[k] || '📌') + ' ' + k;
   });
 
   charts.cat = new Chart(canvas.getContext('2d'), {
@@ -436,10 +523,7 @@ function renderCatChart(){
       maintainAspectRatio: false,
       animation: { animateRotate: true, animateScale: true, duration: 1200, easing: 'easeOutQuart' },
       plugins: {
-        legend: {
-          position: 'bottom',
-          labels: { boxWidth: 10, font: { size: 10 }, padding: 6 }
-        },
+        legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 }, padding: 6 } },
         tooltip: {
           callbacks: {
             label: function(ctx){
@@ -478,12 +562,11 @@ function renderTimeChart(){
   if(chartOffset === 0){
     gs('getChartData', currentChartMode)
       .then(function(res){
-        if(!res || !res.labels){ throw new Error('ไม่มีข้อมูล'); }
+        if(!res || !res.labels) throw new Error('ไม่มีข้อมูล');
         drawTimeChart(res);
       })
       .catch(function(e){
         toast('โหลดกราฟไม่สำเร็จ: ' + e.message);
-        console.error('Chart error:', e);
       });
   } else {
     loadChartWithOffset();
@@ -553,9 +636,7 @@ function drawTimeChart(res){
             maxRotation: 60,
             minRotation: 0,
             callback: function(value, index){
-              if(index % skipEvery === 0) {
-                return this.getLabelForValue(value);
-              }
+              if(index % skipEvery === 0) return this.getLabelForValue(value);
               return '';
             }
           }
@@ -579,7 +660,6 @@ function switchChartMode(mode, btn){
   renderTimeChart();
 }
 
-/* ============ CHART NAVIGATION ============ */
 function shiftChart(direction){
   if(currentChartMode === 'overview' || isCustomRange) return;
   chartOffset += direction;
@@ -591,11 +671,10 @@ function loadChartWithOffset(){
   if(!canvas) return;
 
   updateNavButtons();
-
   loading(true);
   gs('getChartDataShift', currentChartMode, chartOffset)
     .then(function(res){
-      if(!res || !res.labels){ throw new Error('ไม่มีข้อมูล'); }
+      if(!res || !res.labels) throw new Error('ไม่มีข้อมูล');
       drawTimeChart(res);
       loading(false);
     })
@@ -633,8 +712,8 @@ function updateNavButtons(){
 function backToNow(){
   chartOffset = 0;
   isCustomRange = false;
-
   currentChartMode = 'overview';
+
   document.querySelectorAll('.chart-controls .chip').forEach(function(c){
     c.classList.remove('active');
     if(c.dataset.mode === 'overview') c.classList.add('active');
@@ -661,8 +740,7 @@ function backToNow(){
 
 /* ============ DATE RANGE ============ */
 function openDateRangeModal(){
-  var modal = document.getElementById('dateRangeModal');
-  modal.classList.add('show');
+  document.getElementById('dateRangeModal').classList.add('show');
 
   var today = new Date();
   var month = new Date();
@@ -711,10 +789,7 @@ function updateDateRangePreview(){
   var start = document.getElementById('dr-start').value;
   var end = document.getElementById('dr-end').value;
   var el = document.getElementById('dr-preview');
-  if(!start || !end){
-    el.textContent = '';
-    return;
-  }
+  if(!start || !end){ el.textContent = ''; return; }
   var s = new Date(start);
   var e = new Date(end);
   if(s > e){
@@ -731,14 +806,8 @@ function applyDateRange(){
   var start = document.getElementById('dr-start').value;
   var end = document.getElementById('dr-end').value;
 
-  if(!start || !end){
-    toast('⚠️ เลือกวันที่ให้ครบก่อนนะ');
-    return;
-  }
-  if(new Date(start) > new Date(end)){
-    toast('⚠️ วันเริ่มต้องมาก่อนวันสิ้นสุด');
-    return;
-  }
+  if(!start || !end){ toast('⚠️ เลือกวันที่ให้ครบก่อนนะ'); return; }
+  if(new Date(start) > new Date(end)){ toast('⚠️ วันเริ่มต้องมาก่อนวันสิ้นสุด'); return; }
 
   closeDateRangeModal();
   isCustomRange = true;
@@ -752,8 +821,8 @@ function applyDateRange(){
   loading(true);
   gs('getChartDataCustom', start, end)
     .then(function(res){
-      if(!res || !res.labels){ throw new Error('ไม่มีข้อมูล'); }
-      if(res.error){ throw new Error(res.error); }
+      if(!res || !res.labels) throw new Error('ไม่มีข้อมูล');
+      if(res.error) throw new Error(res.error);
       drawTimeChart(res);
       updateNavButtons();
       loading(false);
@@ -779,8 +848,7 @@ function renderPayChart(){
 
   var iconMap = DASH.payIconMap || {};
   var labelsWithIcon = keys.map(function(k){
-    var ic = iconMap[k] || '💳';
-    return ic + ' ' + k;
+    return (iconMap[k] || '💳') + ' ' + k;
   });
 
   charts.pay = new Chart(canvas.getContext('2d'), {
@@ -799,10 +867,7 @@ function renderPayChart(){
       maintainAspectRatio: false,
       animation: { animateRotate: true, animateScale: true, duration: 1200, easing: 'easeOutQuart' },
       plugins: {
-        legend: {
-          position: 'bottom',
-          labels: { boxWidth: 10, font: { size: 10 }, padding: 6 }
-        },
+        legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 }, padding: 6 } },
         tooltip: {
           callbacks: {
             label: function(ctx){
@@ -870,17 +935,12 @@ function renderCatLimits(){
     var catIcon = catObj ? catObj.icon : c.icon;
 
     var catDataJSON = JSON.stringify({
-      id: catId,
-      name: c.name,
-      icon: catIcon,
-      limit: catLimit,
-      color: catColor
+      id: catId, name: c.name, icon: catIcon, limit: catLimit, color: catColor
     }).replace(/'/g, "&#39;");
 
     html +=
       '<div class="cat-card ' + cardClass + '">' +
-        badge +
-        customBadge +
+        badge + customBadge +
         '<div class="cat-card-header">' +
           '<div class="cat-card-icon" style="background:' + (c.color || '#FFD9E8') + '">' + c.icon + '</div>' +
           '<div class="cat-card-title">' +
@@ -888,44 +948,25 @@ function renderCatLimits(){
             '<div class="sub">' + (limit > 0 ? 'คงเหลือ ' + pctRemain.toFixed(0) + '%' : 'ไม่กำหนดวงเงิน') + '</div>' +
           '</div>' +
           '<div class="cat-card-actions">' +
-            '<button class="cat-action-btn edit" ' +
-              'onclick=\'openCatModal(' + catDataJSON + ')\' ' +
-              'title="แก้ไขหมวดหมู่">✏️</button>' +
-            '<button class="cat-action-btn add" ' +
-              'onclick="quickAddExpense(\'' + c.name.replace(/'/g, "\\'") + '\')" ' +
-              'title="เพิ่มรายการในหมวดนี้">➕</button>' +
-            '<button class="cat-action-btn list" ' +
-              'onclick="filterByCategory(\'' + c.name.replace(/'/g, "\\'") + '\')" ' +
-              'title="ดูรายการในหมวดนี้">📋</button>' +
+            '<button class="cat-action-btn edit" onclick=\'openCatModal(' + catDataJSON + ')\' title="แก้ไข">✏️</button>' +
+            '<button class="cat-action-btn add" onclick="quickAddExpense(\'' + c.name.replace(/'/g, "\\'") + '\')" title="เพิ่ม">➕</button>' +
+            '<button class="cat-action-btn list" onclick="filterByCategory(\'' + c.name.replace(/'/g, "\\'") + '\')" title="ดูรายการ">📋</button>' +
           '</div>' +
           '<div class="cat-card-pct" style="color:' + pctColor + '">' + pctDisplay + '</div>' +
         '</div>' +
-
         '<div class="cat-card-amounts">' +
-          '<div class="item used">' +
-            '<span class="lbl">💸 ใช้ไป</span>' +
-            '<span class="val">฿' + fmt(used) + '</span>' +
-          '</div>' +
-          '<div class="item limit">' +
-            '<span class="lbl">🎯 วงเงิน</span>' +
-            '<span class="val">฿' + fmt(limit) + '</span>' +
-          '</div>' +
-          '<div class="item remain">' +
-            '<span class="lbl">💰 คงเหลือ</span>' +
-            '<span class="val">฿' + fmt(remain) + '</span>' +
-          '</div>' +
+          '<div class="item used"><span class="lbl">💸 ใช้ไป</span><span class="val">฿' + fmt(used) + '</span></div>' +
+          '<div class="item limit"><span class="lbl">🎯 วงเงิน</span><span class="val">฿' + fmt(limit) + '</span></div>' +
+          '<div class="item remain"><span class="lbl">💰 คงเหลือ</span><span class="val">฿' + fmt(remain) + '</span></div>' +
         '</div>' +
-
-        '<div class="cat-card-bar">' +
-          '<div style="width:' + pctUsed + '%; background:' + barColor + '"></div>' +
-        '</div>' +
+        '<div class="cat-card-bar"><div style="width:' + pctUsed + '%; background:' + barColor + '"></div></div>' +
       '</div>';
   });
   html += '</div>';
   wrap.innerHTML = html;
 }
 
-/* ============ QUICK ADD EXPENSE ============ */
+/* ============ QUICK ADD ============ */
 function quickAddExpense(categoryName){
   var addBtn = null;
   document.querySelectorAll('.tab').forEach(function(t){
@@ -954,7 +995,7 @@ function quickAddExpense(categoryName){
   }, 150);
 }
 
-/* ============ FILTER BY CATEGORY ============ */
+/* ============ FILTER ============ */
 function filterByCategory(categoryName){
   if(currentFilterCategory === categoryName){
     clearCategoryFilter();
@@ -977,9 +1018,7 @@ function filterByCategory(categoryName){
     '<button class="clear-filter" onclick="clearCategoryFilter()">✖ ล้างตัวกรอง</button>';
   banner.classList.add('show');
 
-  setTimeout(function(){
-    renderFilteredList();
-  }, 150);
+  setTimeout(function(){ renderFilteredList(); }, 150);
 }
 
 function clearCategoryFilter(){
@@ -995,26 +1034,19 @@ function loadExpensePage(page){
   loading(true);
   gs('getExpensesPaged', currentExpenseLimit, page, dashMonth)
     .then(function(res){
-      if(!res || !res.items){
-        throw new Error('ไม่สามารถโหลดข้อมูลได้');
-      }
+      if(!res || !res.items) throw new Error('โหลดไม่ได้');
       currentExpensePage = res.page;
       currentTotalPages = res.totalPages;
       currentTotalItems = res.total;
-
       renderExpenseItems(res.items);
       renderPagination(res);
-
       if(res.items.length === 0 && res.total > 0 && page > 1){
         loadExpensePage(res.totalPages);
         return;
       }
       loading(false);
     })
-    .catch(function(e){
-      loading(false);
-      toast('❌ ' + e.message);
-    });
+    .catch(function(e){ loading(false); toast('❌ ' + e.message); });
 }
 
 function renderExpenseItems(items){
@@ -1055,30 +1087,18 @@ function renderPagination(res){
   var wrap = document.getElementById('pagination');
   if(!wrap) return;
 
-  if(res.total === 0){
-    wrap.innerHTML = '';
-    return;
-  }
+  if(res.total === 0){ wrap.innerHTML = ''; return; }
 
   if(res.totalPages <= 1){
-    wrap.innerHTML =
-      '<div class="page-info">' +
-        'แสดง <b>' + res.total + '</b> รายการ' +
-      '</div>';
+    wrap.innerHTML = '<div class="page-info">แสดง <b>' + res.total + '</b> รายการ</div>';
     return;
   }
 
-  var prevDisabled = res.page <= 1 ? ' disabled' : '';
-  var prevBtn =
-    '<button class="page-btn" onclick="goToPage(' + (res.page - 1) + ')"' + prevDisabled + '>' +
-      '◀ ก่อนหน้า' +
-    '</button>';
+  var prevBtn = '<button class="page-btn" onclick="goToPage(' + (res.page - 1) + ')"' +
+    (res.page <= 1 ? ' disabled' : '') + '>◀ ก่อนหน้า</button>';
 
-  var nextDisabled = res.page >= res.totalPages ? ' disabled' : '';
-  var nextBtn =
-    '<button class="page-btn" onclick="goToPage(' + (res.page + 1) + ')"' + nextDisabled + '>' +
-      'ถัดไป ▶' +
-    '</button>';
+  var nextBtn = '<button class="page-btn" onclick="goToPage(' + (res.page + 1) + ')"' +
+    (res.page >= res.totalPages ? ' disabled' : '') + '>ถัดไป ▶</button>';
 
   var pages = [];
   var total = res.totalPages;
@@ -1099,13 +1119,9 @@ function renderPagination(res){
 
   var numsHtml = '';
   pages.forEach(function(p){
-    if(p === '...'){
-      numsHtml += '<span class="page-num dots">…</span>';
-    } else if(p === cur){
-      numsHtml += '<button class="page-num active">' + p + '</button>';
-    } else {
-      numsHtml += '<button class="page-num" onclick="goToPage(' + p + ')">' + p + '</button>';
-    }
+    if(p === '...') numsHtml += '<span class="page-num dots">…</span>';
+    else if(p === cur) numsHtml += '<button class="page-num active">' + p + '</button>';
+    else numsHtml += '<button class="page-num" onclick="goToPage(' + p + ')">' + p + '</button>';
   });
 
   wrap.innerHTML =
@@ -1120,23 +1136,18 @@ function renderPagination(res){
 
 function goToPage(page){
   if(page < 1 || page > currentTotalPages) return;
-
   if(currentFilterCategory){
     filterPage = page;
     renderFilteredList();
   } else {
     loadExpensePage(page);
   }
-
   var el = document.getElementById('list');
   if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
 }
 
 function renderFilteredList(){
-  if(!currentFilterCategory){
-    loadExpenseList();
-    return;
-  }
+  if(!currentFilterCategory){ loadExpenseList(); return; }
 
   loading(true);
   gs('getExpensesPagedFilter', filterPageSize, filterPage, currentFilterCategory)
@@ -1148,17 +1159,11 @@ function renderFilteredList(){
       renderPagination(res);
       loading(false);
     })
-    .catch(function(e){
-      loading(false);
-      toast('❌ ' + e.message);
-    });
+    .catch(function(e){ loading(false); toast('❌ ' + e.message); });
 }
 
 function loadExpenseList(){
-  if(currentFilterCategory){
-    renderFilteredList();
-    return;
-  }
+  if(currentFilterCategory){ renderFilteredList(); return; }
 
   var list = (DASH && DASH.expenses) ? DASH.expenses : [];
   if(list.length === 0){
@@ -1167,7 +1172,6 @@ function loadExpenseList(){
     document.getElementById('pagination').innerHTML = '';
     return;
   }
-
   renderExpenseItems(list);
   document.getElementById('pagination').innerHTML = '';
 }
@@ -1194,13 +1198,14 @@ function delExpense(id){
   if(!confirm('ลบรายการนี้?')) return;
   loading(true);
   gs('deleteExpense', id)
-    .then(function(){ toast('🗑️ ลบแล้ว'); return loadDashboard(); })
     .then(function(){
-      if(currentFilterCategory){
-        renderFilteredList();
-      } else {
-        loadExpensePage(currentExpensePage);
-      }
+      toast('🗑️ ลบแล้ว');
+      invalidateCache();
+      return loadDashboard();
+    })
+    .then(function(){
+      if(currentFilterCategory) renderFilteredList();
+      else loadExpensePage(currentExpensePage);
       loading(false);
     })
     .catch(function(e){ loading(false); toast('❌ ' + e.message); });
@@ -1229,9 +1234,8 @@ function openExpenseEditModal(e){
 }
 
 function saveExpenseEdit(){
-  var id = document.getElementById('m-exp-id').value;
   var payload = {
-    id: id,
+    id: document.getElementById('m-exp-id').value,
     date: document.getElementById('m-exp-date').value,
     category: document.getElementById('m-exp-cat').value,
     payment: document.getElementById('m-exp-pay').value,
@@ -1249,14 +1253,12 @@ function saveExpenseEdit(){
     .then(function(){
       toast('✅ แก้ไขสำเร็จ!');
       closeModal('expModal');
+      invalidateCache();
       return loadDashboard();
     })
     .then(function(){
-      if(currentFilterCategory){
-        renderFilteredList();
-      } else {
-        loadExpensePage(currentExpensePage);
-      }
+      if(currentFilterCategory) renderFilteredList();
+      else loadExpensePage(currentExpensePage);
       loading(false);
     })
     .catch(function(e){ loading(false); toast('❌ ' + e.message); });
@@ -1326,13 +1328,12 @@ function saveCat(){
     .then(function(){
       toast('✅ บันทึกแล้ว');
       closeModal('catModal');
+      invalidateCache();
       return loadCategories();
     })
     .then(function(){
       loading(false);
-      if(document.getElementById('dash').classList.contains('active')){
-        loadDashboard();
-      }
+      if(document.getElementById('dash').classList.contains('active')) loadDashboard();
     })
     .catch(function(e){ loading(false); toast('❌ ' + e.message); });
 }
@@ -1341,12 +1342,14 @@ function delCat(id){
   if(!confirm('ลบหมวดหมู่นี้?')) return;
   loading(true);
   gs('deleteCategory', id)
-    .then(function(){ toast('🗑️ ลบแล้ว'); return loadCategories(); })
+    .then(function(){
+      toast('🗑️ ลบแล้ว');
+      invalidateCache();
+      return loadCategories();
+    })
     .then(function(){
       loading(false);
-      if(document.getElementById('dash').classList.contains('active')){
-        loadDashboard();
-      }
+      if(document.getElementById('dash').classList.contains('active')) loadDashboard();
     })
     .catch(function(e){ loading(false); toast('❌ ' + e.message); });
 }
@@ -1406,6 +1409,7 @@ function savePay(){
     .then(function(){
       toast('✅ บันทึกแล้ว');
       closeModal('payModal');
+      invalidateCache();
       return loadPayments();
     })
     .then(function(){ loading(false); })
@@ -1416,7 +1420,11 @@ function delPay(id){
   if(!confirm('ลบประเภทนี้?')) return;
   loading(true);
   gs('deletePayment', id)
-    .then(function(){ toast('🗑️ ลบแล้ว'); return loadPayments(); })
+    .then(function(){
+      toast('🗑️ ลบแล้ว');
+      invalidateCache();
+      return loadPayments();
+    })
     .then(function(){ loading(false); })
     .catch(function(e){ loading(false); toast('❌ ' + e.message); });
 }
@@ -1460,9 +1468,7 @@ function loadBudgetMonthly(){
       }
       document.getElementById('bmList').innerHTML = html;
     })
-    .catch(function(e){
-      toast('❌ ' + e.message);
-    });
+    .catch(function(e){ toast('❌ ' + e.message); });
 }
 
 function saveBM(input) {
@@ -1470,16 +1476,9 @@ function saveBM(input) {
   var raw = input.value.trim();
   var val = raw === '' ? 0 : parseFloat(raw);
 
-  if (isNaN(val) || val < 0) {
-    toast('⚠️ ค่าไม่ถูกต้อง');
-    return;
-  }
+  if (isNaN(val) || val < 0) { toast('⚠️ ค่าไม่ถูกต้อง'); return; }
 
-  var payload = {
-    yearMonth: bmMonth,
-    category: cat,
-    limit: val
-  };
+  var payload = { yearMonth: bmMonth, category: cat, limit: val };
 
   gs('setBudgetMonthly', payload)
     .then(function(res){
@@ -1491,6 +1490,7 @@ function saveBM(input) {
         input.classList.add('custom');
         toast('✅ บันทึกแล้ว');
       }
+      invalidateCache();
       loadBudgetMonthly();
     })
     .catch(function(e){ toast('❌ ' + e.message); });
@@ -1501,6 +1501,7 @@ function clearBM(cat) {
   gs('deleteBudgetMonthly', bmMonth, cat)
     .then(function(){
       toast('🗑️ ล้างแล้ว');
+      invalidateCache();
       loadBudgetMonthly();
     })
     .catch(function(e){ toast('❌ ' + e.message); });
@@ -1510,11 +1511,9 @@ function copyFromPreviousMonth() {
   if (!confirm('คัดลอกวงเงินจากเดือนก่อนหน้ามาที่ ' + formatMonthTH(bmMonth) + ' ?')) return;
   gs('copyBudgetFromPreviousMonth', bmMonth)
     .then(function(res){
-      if (res.copied > 0) {
-        toast('📋 คัดลอก ' + res.copied + ' รายการ จาก ' + res.from);
-      } else {
-        toast('ℹ️ ไม่มีข้อมูลให้คัดลอก');
-      }
+      if (res.copied > 0) toast('📋 คัดลอก ' + res.copied + ' รายการ จาก ' + res.from);
+      else toast('ℹ️ ไม่มีข้อมูลให้คัดลอก');
+      invalidateCache();
       loadBudgetMonthly();
     })
     .catch(function(e){ toast('❌ ' + e.message); });
