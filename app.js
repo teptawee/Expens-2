@@ -36,6 +36,15 @@ function showPage(id, btn){
   }
 }
 
+function switchToDashboard(){
+  // หาปุ่ม tab ของ Dashboard
+  var dashBtn = null;
+  document.querySelectorAll('.tab').forEach(function(t){
+    var oc = t.getAttribute('onclick') || '';
+    if(oc.indexOf("'dash'") >= 0) dashBtn = t;
+  });
+  showPage('dash', dashBtn);
+}
 function loadExpenseListPage(){
   if(currentFilterCategory){
     renderFilteredList();
