@@ -36,8 +36,8 @@ function showPage(id, btn){
   }
 }
 
+/* ✅ ฟังก์ชันใหม่: สลับไปหน้า Dashboard + highlight tab */
 function switchToDashboard(){
-  // หาปุ่ม tab ของ Dashboard
   var dashBtn = null;
   document.querySelectorAll('.tab').forEach(function(t){
     var oc = t.getAttribute('onclick') || '';
@@ -45,6 +45,7 @@ function switchToDashboard(){
   });
   showPage('dash', dashBtn);
 }
+
 function loadExpenseListPage(){
   if(currentFilterCategory){
     renderFilteredList();
@@ -73,52 +74,47 @@ function closeModal(id){
 }
 
 /* ============ LOCALSTORAGE CACHE ============ */
-function saveExpense(){
-  var date = document.getElementById('f-date').value;
-  var cat = document.getElementById('f-cat').value;
-  var pay = document.getElementById('f-pay').value;
-  var amount = parseFloat(document.getElementById('f-amount').value);
-  var note = document.getElementById('f-note').value.trim();
+function saveCache(key, data, ttl){
+  try{
+    localStorage.setItem('exp_' + key, JSON.stringify({
+      data: data,
+      exp: Date.now() + (ttl || 5*60*1000)
+    }));
+  }catch(e){}
+}
 
-  if(!date || !cat || !pay || !amount || amount <= 0){
-    toast('⚠️ กรอกข้อมูลให้ครบก่อนนะ');
-    return;
-  }
+function loadCache(key){
+  try{
+    var raw = localStorage.getItem('exp_' + key);
+    if(!raw) return null;
+    var obj = JSON.parse(raw);
+    if(Date.now() > obj.exp){
+      localStorage.removeItem('exp_' + key);
+      return null;
+    }
+    return obj.data;
+  }catch(e){ return null; }
+}
 
-  loading(true);
-  gs('addExpense', { date: date, category: cat, payment: pay, amount: amount, note: note })
-    .then(function(){
-      toast('🎉 บันทึกสำเร็จ! เยี่ยมมาก');
-      fireConfetti();
+function clearCache(key){
+  try{
+    if(key) localStorage.removeItem('exp_' + key);
+    else {
+      Object.keys(localStorage)
+        .filter(function(k){ return k.indexOf('exp_') === 0; })
+        .forEach(function(k){ localStorage.removeItem(k); });
+    }
+  }catch(e){}
+}
 
-      // ล้าง cache ทั้งหมด
-      invalidateCache();
-
-      // เคลียร์ฟอร์ม
-      document.getElementById('f-amount').value = '';
-      document.getElementById('f-note').value = '';
-
-      // ตั้งเดือน dashboard เป็นเดือนของรายการที่เพิ่งบันทึก
-      var entryMonth = date.substring(0, 7);
-      if(entryMonth !== dashMonth){
-        dashMonth = entryMonth;
-        document.getElementById('dashMonth').value = dashMonth;
-        var info = document.getElementById('dashMonthInfo');
-        if(dashMonth === getCurrentMonth()){
-          info.textContent = '📌 ปัจจุบัน';
-          info.style.color = '#27AE60';
-        } else {
-          info.textContent = '📅 ' + formatMonthTH(dashMonth);
-          info.style.color = '#B7791F';
-        }
-      }
-
-      // กลับไปหน้า Dashboard และโหลดข้อมูลใหม่ (force)
-      switchToDashboard();
-      return loadDashboard(true);
-    })
-    .then(function(){ loading(false); })
-    .catch(function(e){ loading(false); toast('❌ ' + e.message); });
+/* ✅ แก้ไข: ลบ dashboard cache ของทุกเดือน */
+function invalidateCache(){
+  clearCache('initData');
+  try{
+    Object.keys(localStorage)
+      .filter(function(k){ return k.indexOf('exp_dashboard_') === 0; })
+      .forEach(function(k){ localStorage.removeItem(k); });
+  }catch(e){}
 }
 
 /* ============ API CALL ============ */
@@ -280,7 +276,6 @@ window.addEventListener('load', function(){
 
   console.log('🔧 API_URL =', API_URL);
 
-  // ⚡ ลองโหลดจาก cache ก่อน (แสดงทันที)
   var cached = loadCache('initData');
   if(cached){
     applyInitData(cached, true);
@@ -289,7 +284,6 @@ window.addEventListener('load', function(){
     loading(true);
   }
 
-  // ⚡ เรียก API รอบเดียว
   var t0 = performance.now();
   gs('getInitData', currentExpenseLimit, dashMonth)
     .then(function(data){
@@ -358,6 +352,7 @@ function changeDashMonth() {
 }
 
 /* ============ SAVE EXPENSE ============ */
+/* ✅ แก้ไข: หลังบันทึกกลับไปหน้า Dashboard + force refresh */
 function saveExpense(){
   var date = document.getElementById('f-date').value;
   var cat = document.getElementById('f-cat').value;
@@ -375,16 +370,39 @@ function saveExpense(){
     .then(function(){
       toast('🎉 บันทึกสำเร็จ! เยี่ยมมาก');
       fireConfetti();
+
+      // ล้าง cache ทั้งหมด
       invalidateCache();
+
+      // เคลียร์ฟอร์ม
       document.getElementById('f-amount').value = '';
       document.getElementById('f-note').value = '';
-      return loadDashboard();
+
+      // ตั้งเดือน dashboard เป็นเดือนของรายการที่เพิ่งบันทึก
+      var entryMonth = date.substring(0, 7);
+      if(entryMonth !== dashMonth){
+        dashMonth = entryMonth;
+        document.getElementById('dashMonth').value = dashMonth;
+        var info = document.getElementById('dashMonthInfo');
+        if(dashMonth === getCurrentMonth()){
+          info.textContent = '📌 ปัจจุบัน';
+          info.style.color = '#27AE60';
+        } else {
+          info.textContent = '📅 ' + formatMonthTH(dashMonth);
+          info.style.color = '#B7791F';
+        }
+      }
+
+      // กลับไปหน้า Dashboard และโหลดข้อมูลใหม่ (force)
+      switchToDashboard();
+      return loadDashboard(true);
     })
     .then(function(){ loading(false); })
     .catch(function(e){ loading(false); toast('❌ ' + e.message); });
 }
 
 /* ============ DASHBOARD (OPTIMIZED) ============ */
+/* ✅ แก้ไข: รับ param forceRefresh เพื่อข้าม cache */
 function loadDashboard(forceRefresh){
   var cached = forceRefresh ? null : loadCache('dashboard_' + dashMonth);
 
@@ -422,6 +440,7 @@ function loadDashboard(forceRefresh){
       console.error('Dashboard error:', e);
     });
 }
+
 /* ============ RENDER SUMMARY ============ */
 function renderSummary(){
   var s = DASH.summary;
